@@ -1,6 +1,6 @@
-import os
 import sqlite3
 import numpy as np
+import os
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -12,49 +12,58 @@ model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
 # --------------------------------------------------
+# Automatically find the latest valid RAG database
+# --------------------------------------------------
+def find_latest_database():
+
+    db_folder = "rag_database"
+
+    if not os.path.exists(db_folder):
+        raise FileNotFoundError(
+            "rag_database folder does not exist."
+        )
+
+    db_files = []
+
+    for file in os.listdir(db_folder):
+
+        if file.lower().endswith(".db"):
+
+            full_path = os.path.join(db_folder, file)
+
+            # Ignore empty/incomplete databases
+            if os.path.getsize(full_path) > 0:
+                db_files.append(full_path)
+
+    if not db_files:
+        raise FileNotFoundError(
+            "No valid .db file found inside rag_database."
+        )
+
+    # Select the most recently modified database
+    latest_db = max(
+        db_files,
+        key=os.path.getmtime
+    )
+
+    return latest_db
+
+
+# --------------------------------------------------
 # Load RAG database
 # --------------------------------------------------
 def load_rag_database(db_path):
 
-    if not os.path.exists(db_path):
-        raise FileNotFoundError(
-            f"Database file not found:\n{db_path}"
-        )
-
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    # Check whether required tables exist
-    cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    )
-
-    tables = [row[0] for row in cursor.fetchall()]
-
-    if "chunks" not in tables:
-        conn.close()
-        raise ValueError(
-            f"'chunks' table not found.\n"
-            f"Available tables: {tables}"
-        )
-
-    if "embeddings" not in tables:
-        conn.close()
-        raise ValueError(
-            f"'embeddings' table not found.\n"
-            f"Available tables: {tables}"
-        )
-
-    # Load chunks and their corresponding embeddings
     cursor.execute("""
-        SELECT
-            chunks.id,
-            chunks.chunk_text,
-            embeddings.vector
+        SELECT chunks.id,
+               chunks.chunk_text,
+               embeddings.vector
         FROM chunks
         JOIN embeddings
-            ON chunks.id = embeddings.chunk_id
-        ORDER BY chunks.id
+        ON chunks.id = embeddings.chunk_id
     """)
 
     data = cursor.fetchall()
@@ -63,55 +72,35 @@ def load_rag_database(db_path):
 
     if not data:
         raise ValueError(
-            "The database contains no chunks with embeddings."
+            "The selected database does not contain any chunks."
         )
 
-    chunk_ids = []
     texts = []
     vectors = []
 
-    for chunk_id, text, vector_blob in data:
+    for row in data:
 
-        chunk_ids.append(chunk_id)
-        texts.append(text)
+        texts.append(row[1])
 
         vector = np.frombuffer(
-            vector_blob,
+            row[2],
             dtype=np.float32
         )
 
         vectors.append(vector)
 
-    vectors = np.array(vectors)
-
-    # Make sure vectors have a valid shape
-    if vectors.ndim != 2:
-        raise ValueError(
-            f"Invalid embedding shape: {vectors.shape}"
-        )
-
-    if len(texts) != len(vectors):
-        raise ValueError(
-            "Number of text chunks and embeddings do not match."
-        )
-
-    print(f"\nLoaded {len(texts)} chunks from database.")
-
-    return texts, vectors
+    return texts, np.array(vectors)
 
 
 # --------------------------------------------------
-# Query the RAG database
+# Query RAG database
 # --------------------------------------------------
 def query_rag(db_path, question, top_k=3):
 
     texts, vectors = load_rag_database(db_path)
 
-    # Create embedding for user's question
-    question_embedding = model.encode(
-        [question],
-        convert_to_numpy=True
-    )
+    # Convert question into embedding
+    question_embedding = model.encode([question])
 
     # Calculate similarity
     similarities = cosine_similarity(
@@ -119,89 +108,52 @@ def query_rag(db_path, question, top_k=3):
         vectors
     )[0]
 
-    # Don't request more results than available
-    top_k = min(top_k, len(texts))
-
-    # Get highest scoring chunks
+    # Get top matching chunks
     top_indices = similarities.argsort()[-top_k:][::-1]
+
+    retrieved_context = "\n\n".join(
+        [texts[i] for i in top_indices]
+    )
 
     print("\n" + "=" * 70)
     print("RETRIEVED CONTEXT")
     print("=" * 70)
 
-    for rank, index in enumerate(top_indices, start=1):
-
-        print(f"\nResult {rank}")
-        print("-" * 70)
-
-        print(
-            f"Similarity Score: "
-            f"{similarities[index]:.4f}"
-        )
-
-        print(
-            f"\n{texts[index][:1000]}"
-        )
-
-    # --------------------------------------------------
-    # Display combined context
-    # --------------------------------------------------
-    retrieved_context = "\n\n".join(
-        texts[index]
-        for index in top_indices
-    )
-
-    print("\n" + "=" * 70)
-    print("COMBINED RETRIEVED CONTEXT")
-    print("=" * 70)
-
     print(retrieved_context[:3000])
 
     print("\n" + "=" * 70)
-    print("STATUS")
+    print("SUGGESTED ANSWER")
     print("=" * 70)
 
-    print(
-        f"Successfully retrieved "
-        f"{top_k} relevant chunks."
-    )
+    print(retrieved_context[:1000])
 
 
 # --------------------------------------------------
-# Main program
+# Main
 # --------------------------------------------------
 if __name__ == "__main__":
 
-    # IMPORTANT:
-    # This is the database that contains your actual
-    # documents, chunks and embeddings.
-    db_path = r"rag_database\knowledge_base (3).db"
+    try:
 
-    print("=" * 70)
-    print("RagStack - RAG Database Reader")
-    print("=" * 70)
+        # Automatically select latest database
+        db_path = find_latest_database()
 
-    print(f"\nDatabase:")
-    print(db_path)
+        print("\n" + "=" * 70)
+        print("RAG DATABASE")
+        print("=" * 70)
 
-    question = input(
-        "\nEnter your question: "
-    ).strip()
+        print(db_path)
 
-    if not question:
-        print("\nPlease enter a question.")
-    else:
-        try:
-            query_rag(
-                db_path,
-                question,
-                top_k=3
-            )
+        print("=" * 70)
 
-        except Exception as e:
+        question = input("\nEnter your question: ")
 
-            print("\n" + "=" * 70)
-            print("ERROR")
-            print("=" * 70)
+        query_rag(
+            db_path,
+            question
+        )
 
-            print(str(e))
+    except Exception as e:
+
+        print("\nERROR:")
+        print(e)
